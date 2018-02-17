@@ -7,21 +7,30 @@ import org.geowebcache.GeoWebCacheException;
 import org.geowebcache.GeoWebCacheExtensions;
 import org.geowebcache.config.BlobStoreConfiguration;
 import org.geowebcache.config.BlobStoreInfo;
+import org.geowebcache.config.ConfigurationAggregator;
 import org.geowebcache.config.ServerConfiguration;
 import org.geowebcache.config.meta.ServiceInformation;
 import org.geowebcache.util.CompositeIterable;
+import org.springframework.beans.BeansException;
+import org.springframework.beans.factory.InitializingBean;
+import org.springframework.context.ApplicationContext;
+import org.springframework.context.ApplicationContextAware;
 import org.springframework.util.Assert;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.NoSuchElementException;
-import java.util.Optional;
+import java.util.*;
+import java.util.stream.Collectors;
 
-public class BlobStoreAggregator {
+public class BlobStoreAggregator implements ConfigurationAggregator<BlobStoreConfiguration>, ApplicationContextAware, InitializingBean {
 
     private List<BlobStoreConfiguration> configs;
     private static Log log = LogFactory.getLog(org.geowebcache.storage.BlobStoreAggregator.class);
-    private ServiceInformation serviceInformation;
+    private ApplicationContext applicationContext;
+
+    /**
+     * Used to delegate calls to {@link BlobStoreConfiguration} objects
+     */
+    public BlobStoreAggregator() {
+    }
 
     /**
      * Used to delegate calls to {@link BlobStoreConfiguration} objects
@@ -29,14 +38,6 @@ public class BlobStoreAggregator {
      */
     public BlobStoreAggregator(List<BlobStoreConfiguration> configs) {
         this.configs = configs == null ? new ArrayList<BlobStoreConfiguration>() : configs;
-        initialize();
-    }
-
-    /**
-     * Used to delegate calls to {@link BlobStoreConfiguration} objects
-     */
-    public BlobStoreAggregator() {
-        reInit();
     }
 
     /**
@@ -44,7 +45,6 @@ public class BlobStoreAggregator {
      * @param config a new {@link BlobStoreConfiguration} to add to the configs list
      */
     public void addConfiguration(BlobStoreConfiguration config) {
-        initialize(config);
         List<BlobStoreConfiguration> newList = new ArrayList<BlobStoreConfiguration>(configs);
         newList.add(config);
         this.configs = newList;
@@ -87,19 +87,6 @@ public class BlobStoreAggregator {
                 + " it may not have loaded properly.");
     }
 
-    /***
-     * Reinitialization is tricky, because we can't really just lock all the blobstores, because this
-     * would cause people to queue on something that we may not want to exist post reinit.
-     *
-     * So we'll just set the current blobstore set free, ready for garbage collection, and generate a
-     * new one.
-     *
-     */
-    public void reInit() {
-        List<BlobStoreConfiguration> extensions = GeoWebCacheExtensions.extensions(BlobStoreConfiguration.class);
-        this.configs = new ArrayList<BlobStoreConfiguration>(extensions);
-        initialize();
-    }
     /**
      * Retrieves the number of {@link BlobStoreInfo}s in the blobstore configuration.
      * @return The number of {@link BlobStoreInfo}s currently configured.
@@ -145,55 +132,6 @@ public class BlobStoreAggregator {
         }
 
         return new CompositeIterable<BlobStoreInfo>(perConfigBlobStores);
-    }
-
-    private void initialize() {
-        log.debug("Thread initBlobStore(), initializing");
-
-        for (BlobStoreConfiguration config : configs) {
-            initialize(config);
-        }
-    }
-
-    private int initialize(BlobStoreConfiguration config) {
-        if (config == null) {
-            throw new IllegalStateException(
-                    "BlobStoreConfiguration got a null GWC configuration object");
-        }
-
-        String configIdent;
-        try {
-            configIdent = config.getIdentifier();
-        } catch (Exception gwce) {
-            log.error("Error obtaining identify from BlobStoreConfiguration " + config, gwce);
-            return 0;
-        }
-
-        if (configIdent == null) {
-            log.warn("Got a GWC configuration with no identity, ignoring it:" + config);
-            return 0;
-        }
-
-        int blobStoreCount = config.getBlobStoreCount();
-
-        if (blobStoreCount <= 0) {
-            log.info("BlobStoreConfiguration " + config.getIdentifier() + " contained no blob store infos.");
-        }
-
-        // Check whether there is any general service information
-        if (this.serviceInformation == null && config instanceof ServerConfiguration) {
-            log.debug("Reading service information.");
-            this.serviceInformation = ((ServerConfiguration) config).getServiceInformation();
-        }
-        return blobStoreCount;
-    }
-
-    /**
-     * Service information such as you or your company's details that you want provided in capabilities documents.
-     * @return ServiceInformation
-     */
-    public ServiceInformation getServiceInformation() {
-        return this.serviceInformation;
     }
 
     /**
@@ -287,5 +225,28 @@ public class BlobStoreAggregator {
             }
         }
         throw new IllegalArgumentException("No configuration found containing blob store " + blobStoreName);
+    }
+
+    @Override
+    public void afterPropertiesSet() throws Exception {
+        this.configs = GeoWebCacheExtensions.configurations(BlobStoreConfiguration.class, applicationContext);
+    }
+
+    @Override
+    public void setApplicationContext(ApplicationContext applicationContext) throws BeansException {
+        if(this.applicationContext!=null) throw new IllegalStateException("Application context has already been set");
+        Objects.requireNonNull(applicationContext);
+        this.applicationContext = applicationContext;
+    }
+    @Override
+    public <BSA extends BlobStoreConfiguration> List<? extends BSA> getConfigurations(Class<BSA> type) {
+        if(type==BlobStoreConfiguration.class) {
+            return (List<? extends BSA>) Collections.unmodifiableList(configs);
+        } else {
+            return configs.stream()
+                    .filter(type::isInstance)
+                    .map(type::cast)
+                    .collect(Collectors.toList());
+        }
     }
 }
